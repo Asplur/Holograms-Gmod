@@ -2,21 +2,50 @@
 --@author Asplur
 --@shared
 
+-- Parts are read from garrysmod/data/starfall/snareflea/<name>.txt on the owner's
+-- machine, sent to the server in one stream, then passed on to every player.
+local FOLDER = "snareflea/"
+local Parts = {
+    "SnareFlea_Head",
+    "SnareFlea_Segment_1", "SnareFlea_Segment_2", "SnareFlea_Segment_3",
+    "SnareFlea_Segment_4", "SnareFlea_Segment_5", "SnareFlea_Segment_6_Tail",
+    "SnareFlea_Leg_L1", "SnareFlea_Leg_L2", "SnareFlea_Leg_L3", "SnareFlea_Leg_L4", "SnareFlea_Leg_L5",
+    "SnareFlea_Leg_R1", "SnareFlea_Leg_R2", "SnareFlea_Leg_R3", "SnareFlea_Leg_R4", "SnareFlea_Leg_R5",
+}
+
+if SERVER then
+    local blob
+
+    local function sendBlob(target)
+        net.start("flea_data")
+        net.writeStream(blob)
+        net.send(target)
+    end
+
+    -- owner uploads the bundle once
+    net.receive("flea_up", function(len, ply)
+        if ply ~= owner() or blob then return end
+        net.readStream(function(data)
+            if not data or blob then return end
+            blob = data
+            print("Snare flea data received (" .. #blob .. " bytes), sending to players")
+            sendBlob(nil)
+        end)
+    end)
+
+    -- players who join (or load) later ask for it
+    net.receive("flea_req", function(len, ply)
+        if blob then sendBlob(ply) end
+    end)
+    return
+end
+
 if CLIENT then
     local BASE = "https://raw.githubusercontent.com/Asplur/Holograms-Gmod/refs/heads/main/"
     local SCALE = 1          -- 1 = ~92 units long
     local FOOT_DROP = 10.6   -- distance from model origin down to the feet (unscaled)
     local WALK_SPEED = 120
     local FOLLOW_DIST = 200
-
-    -- every part shares the same origin, so they all sit at 0,0,0 on the root
-    local Parts = {
-        "SnareFlea_Head",
-        "SnareFlea_Segment_1", "SnareFlea_Segment_2", "SnareFlea_Segment_3",
-        "SnareFlea_Segment_4", "SnareFlea_Segment_5", "SnareFlea_Segment_6_Tail",
-        "SnareFlea_Leg_L1", "SnareFlea_Leg_L2", "SnareFlea_Leg_L3", "SnareFlea_Leg_L4", "SnareFlea_Leg_L5",
-        "SnareFlea_Leg_R1", "SnareFlea_Leg_R2", "SnareFlea_Leg_R3", "SnareFlea_Leg_R4", "SnareFlea_Leg_R5",
-    }
 
     local Tex = material.create("VertexLitGeneric")
     Tex:setTextureURL("$basetexture", BASE .. "SnareFlea.png")
@@ -111,13 +140,21 @@ if CLIENT then
         return m, turn(pivot), side, num
     end
 
-    local function loadNext()
-        if idx > #Parts then return end
-        local name = Parts[idx]
-        local holo = hologram.create(root:getPos(), root:getAngles(), "models/hunter/blocks/cube025x025x025.mdl", Vector(SCALE))
-        holo:setParent(root)
-        Holos[name] = holo
-        http.get(BASE .. name .. ".obj", function(d)
+    local function loadAll(objs)
+        local function loadNext()
+            if idx > #Parts then return end
+            local name = Parts[idx]
+            local d = objs[name]
+            idx = idx + 1
+            if not d then
+                print("Missing part data: " .. name)
+                loaded = loaded + 1
+                timer.simple(0, loadNext)
+                return
+            end
+            local holo = hologram.create(root:getPos(), root:getAngles(), "models/hunter/blocks/cube025x025x025.mdl", Vector(SCALE))
+            holo:setParent(root)
+            Holos[name] = holo
             local m, pivot, side, num
             local done = false
             local co = coroutine.create(function()
@@ -131,6 +168,7 @@ if CLIENT then
                         if not ok then
                             print("Failed to build " .. name .. ": " .. tostring(err))
                             hook.remove("think", "load" .. name)
+                            timer.simple(0, loadNext)
                             return
                         end
                     end
@@ -148,13 +186,53 @@ if CLIENT then
                             startMovement()
                         end
                         hook.remove("think", "load" .. name)
+                        timer.simple(0, loadNext)
                         return
                     end
                 end
             end)
-        end)
-        idx = idx + 1
-        timer.simple(0.25, loadNext)
+        end
+        loadNext()
     end
-    loadNext()
+
+    -- bundle format: name \0 objtext \0 name \0 objtext \0 ...
+    local function unpackBlob(blob)
+        local objs, pos = {}, 1
+        while pos <= #blob do
+            local a = string.find(blob, "\0", pos, true)
+            if not a then break end
+            local b = string.find(blob, "\0", a + 1, true) or (#blob + 1)
+            objs[string.sub(blob, pos, a - 1)] = string.sub(blob, a + 1, b - 1)
+            pos = b + 1
+        end
+        return objs
+    end
+
+    local started = false
+    net.receive("flea_data", function()
+        net.readStream(function(blob)
+            if started or not blob then return end
+            started = true
+            loadAll(unpackBlob(blob))
+        end)
+    end)
+
+    -- owner reads the parts from disk and uploads them
+    if player() == owner() then
+        local chunks = {}
+        for _, name in ipairs(Parts) do
+            local d = file.read(FOLDER .. name .. ".txt")
+            if d then
+                chunks[#chunks + 1] = name .. "\0" .. d
+            else
+                print("Couldn't read data/starfall/" .. FOLDER .. name .. ".txt")
+            end
+        end
+        net.start("flea_up")
+        net.writeStream(table.concat(chunks, "\0"))
+        net.send()
+    else
+        net.start("flea_req")
+        net.send()
+    end
 end
