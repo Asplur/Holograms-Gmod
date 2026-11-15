@@ -119,17 +119,26 @@ if CLIENT then
         Holos[name] = holo
         http.get(BASE .. name .. ".obj", function(d)
             local m, pivot, side, num
-            local load = coroutine.wrap(function()
+            local done = false
+            local co = coroutine.create(function()
                 m, pivot, side, num = buildPart(name, d)
-                return true
+                done = true
             end)
             hook.add("think", "load" .. name, function()
                 while quotaAverage() < quotaMax() / 2 do
-                    if load() then
+                    if not done then
+                        local ok, err = coroutine.resume(co)
+                        if not ok then
+                            print("Failed to build " .. name .. ": " .. tostring(err))
+                            hook.remove("think", "load" .. name)
+                            return
+                        end
+                    end
+                    if done then
                         holo:setMesh(m)
                         holo:setMeshMaterial(Tex)
                         holo:setRenderBounds(Vector(-70), Vector(70))
-                        holo:setLocalPos(pivot * SCALE)
+                        holo:setLocalPos((pivot or Vector(0, 0, 0)) * SCALE)
                         holo:setLocalAngles(Angle(0, 0, 0))
                         if side then Legs[name] = {holo = holo, side = side, num = num} end
                         loaded = loaded + 1
