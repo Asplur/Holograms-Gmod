@@ -50,7 +50,7 @@ if CLIENT then
     local Tex = material.create("VertexLitGeneric")
     Tex:setTextureURL("$basetexture", BASE .. "SnareFlea.jpg")
 
-    local Holos, Legs = {}, {}
+    local Holos, Legs, Body = {}, {}, {}
     local loaded, idx, allLoaded = 0, 1, false
     local State = "Idle"
     local moveDirection = Vector(0, 0, 0)
@@ -64,29 +64,63 @@ if CLIENT then
         return Vector(-v.y, v.x, v.z)
     end
 
+    -- where a part sits along the body: head 0, segments 1-6
+    local function bodyIndex(name)
+        if name == "SnareFlea_Head" then return 0 end
+        local n = string.match(name, "Segment_(%d)")
+        return n and tonumber(n) or nil
+    end
+
     local function legInfo(name)
         local side, num = string.match(name, "Leg_(%a)(%d)")
         if not side then return nil end
         return side, tonumber(num)
     end
 
-    local function walkingAnimation()
-        local t = timer.systime() * 8
+    -- a hump that travels head to tail, plus a slow side-to-side sway
+    local CRAWL_RATE = 7       -- how fast the wave runs down the body
+    local WAVE_GAP = 0.9       -- phase gap between neighbouring segments
+    local HUMP = 1.8           -- how high each segment lifts
+    local SWAY = 1.4           -- side-to-side drift
+
+    local function bodyWave(k, t, amount)
+        local phase = t - k * WAVE_GAP
+        local bob = math.max(math.sin(phase), 0) * HUMP * amount
+        local pitch = math.cos(phase) * 6 * amount
+        local sw = t * 0.45 - k * 0.6
+        local side = math.sin(sw) * SWAY * amount
+        local yaw = math.cos(sw) * 5 * amount
+        return bob, pitch, side, yaw
+    end
+
+    local function animate(amount, speed)
+        local t = timer.systime() * speed
+        local bobs = {}
+        for name, part in pairs(Body) do
+            local bob, pitch, side, yaw = bodyWave(part.k, t, amount)
+            bobs[part.k] = {bob, side}
+            part.holo:setLocalPos(part.base + Vector(0, side, bob) * SCALE)
+            part.holo:setLocalAngles(Angle(pitch, yaw, 0))
+        end
         for name, leg in pairs(Legs) do
-            local phase = t - leg.num * 0.9 + (leg.side == "R" and math.pi or 0)
-            local swing = math.sin(phase) * 22
-            local lift = math.max(math.cos(phase), 0) * 18
+            -- each leg rides on its segment and steps a beat after the hump passes it
+            local k = math.min(leg.num, 6)
+            local b = bobs[k] or {0, 0}
             local s = leg.side == "L" and 1 or -1
+            local phase = t - k * WAVE_GAP + (leg.side == "R" and math.pi or 0)
+            local swing = math.sin(phase) * 24 * amount
+            local lift = math.max(math.cos(phase), 0) * 22 * amount
+            leg.holo:setLocalPos(leg.base + Vector(0, b[2], b[1]) * SCALE)
             leg.holo:setLocalAngles(Angle(0, swing * s, -lift * s))
         end
     end
 
+    local function walkingAnimation()
+        animate(1, CRAWL_RATE)
+    end
+
     local function idleAnimation()
-        local t = timer.systime() * 2
-        for name, leg in pairs(Legs) do
-            local s = leg.side == "L" and 1 or -1
-            leg.holo:setLocalAngles(Angle(0, math.sin(t + leg.num) * 2 * s, 0))
-        end
+        animate(0.15, 2)
     end
 
     local function updateState()
@@ -130,6 +164,13 @@ if CLIENT then
                 if d < best then best = d; pivot = v.pos end
             end
             pivot = Vector(pivot.x, pivot.y, pivot.z)
+        elseif bodyIndex(name) then
+            local sum, n = Vector(0, 0, 0), 0
+            for _, v in ipairs(verts) do
+                sum = sum + v.pos
+                n = n + 1
+            end
+            if n > 0 then pivot = sum / n end
         end
         for i, v in ipairs(verts) do
             v.pos = turn(v.pos - pivot)
@@ -171,7 +212,10 @@ if CLIENT then
                         holo:setRenderBounds(Vector(-70), Vector(70))
                         holo:setLocalPos((pivot or Vector(0, 0, 0)) * SCALE)
                         holo:setLocalAngles(Angle(0, 0, 0))
-                        if side then Legs[name] = {holo = holo, side = side, num = num} end
+                        local base = (pivot or Vector(0, 0, 0)) * SCALE
+                        if side then Legs[name] = {holo = holo, side = side, num = num, base = base} end
+                        local k = bodyIndex(name)
+                        if k then Body[name] = {holo = holo, k = k, base = base} end
                         loaded = loaded + 1
                         if loaded == #Parts then
                             print("Snare flea loaded!")
