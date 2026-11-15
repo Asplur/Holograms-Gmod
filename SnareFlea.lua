@@ -48,7 +48,7 @@ if CLIENT then
     local FOLLOW_DIST = 200
 
     local Tex = material.create("VertexLitGeneric")
-    Tex:setTextureURL("$basetexture", BASE .. "SnareFlea.png")
+    Tex:setTextureURL("$basetexture", BASE .. "SnareFlea.jpg")
 
     local Holos, Legs = {}, {}
     local loaded, idx, allLoaded = 0, 1, false
