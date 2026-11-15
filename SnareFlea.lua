@@ -2,7 +2,7 @@
 --@author Asplur
 --@shared
 
--- Parts are read from garrysmod/data/starfall/snareflea/<name>.txt on the owner's
+-- Parts are read from garrysmod/data/sf_filedata/snareflea/<name>.txt on the owner's
 -- machine, sent to the server in one stream, then passed on to every player.
 local FOLDER = "snareflea/"
 local Parts = {
@@ -225,12 +225,16 @@ if CLIENT then
             if d then
                 chunks[#chunks + 1] = name .. "\0" .. d
             else
-                print("Couldn't read data/starfall/" .. FOLDER .. name .. ".txt")
+                print("Couldn't read data/sf_filedata/" .. FOLDER .. name .. ".txt")
             end
         end
-        net.start("flea_up")
-        net.writeStream(table.concat(chunks, "\0"))
-        net.send()
+        if #chunks == 0 then
+            print("No snare flea parts found, nothing to send")
+        else
+            net.start("flea_up")
+            net.writeStream(table.concat(chunks, "\0"))
+            net.send()
+        end
     else
         net.start("flea_req")
         net.send()
