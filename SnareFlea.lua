@@ -157,21 +157,14 @@ if CLIENT then
             Holos[name] = holo
             local m, pivot, side, num
             local done = false
-            local co = coroutine.create(function()
+            local step = coroutine.wrap(function()
                 m, pivot, side, num = buildPart(name, d)
                 done = true
+                return true
             end)
             hook.add("think", "load" .. name, function()
                 while quotaAverage() < quotaMax() / 2 do
-                    if not done then
-                        local ok, err = coroutine.resume(co)
-                        if not ok then
-                            print("Failed to build " .. name .. ": " .. tostring(err))
-                            hook.remove("think", "load" .. name)
-                            timer.simple(0, loadNext)
-                            return
-                        end
-                    end
+                    if not done then step() end
                     if done then
                         holo:setMesh(m)
                         holo:setMeshMaterial(Tex)
