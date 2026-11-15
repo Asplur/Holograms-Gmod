@@ -53,7 +53,6 @@ if CLIENT then
     local Holos, Legs, Body = {}, {}, {}
     local loaded, idx, allLoaded = 0, 1, false
     local State = "Idle"
-    local moveDirection = Vector(0, 0, 0)
 
     local root = hologram.create(chip():getPos() + Vector(0, 0, FOOT_DROP * SCALE), Angle(0, chip():getAngles().y, 0),
         "models/hunter/blocks/cube025x025x025.mdl", Vector(1))
@@ -77,72 +76,118 @@ if CLIENT then
         return side, tonumber(num)
     end
 
-    -- a hump that travels head to tail, plus a slow side-to-side sway
-    local CRAWL_RATE = 7       -- how fast the wave runs down the body
+    -- ---------- snake-style following ----------
+    local CRAWL_RATE = 7       -- how fast the hump runs down the body
     local WAVE_GAP = 0.9       -- phase gap between neighbouring segments
     local HUMP = 1.8           -- how high each segment lifts
-    local SWAY = 1.4           -- side-to-side drift
+    local TURN_RATE = 140      -- degrees per second the head can turn
+    local WEAVE = 25           -- degrees of side-to-side weave while crawling
+    local WEAVE_RATE = 2.2     -- how quickly it weaves
+    local TRAIL_STEP = 3       -- distance between trail points
 
-    local function bodyWave(k, t, amount)
-        local phase = t - k * WAVE_GAP
-        local bob = math.max(math.sin(phase), 0) * HUMP * amount
-        local pitch = math.cos(phase) * 6 * amount
-        local sw = t * 0.45 - k * 0.6
-        local side = math.sin(sw) * SWAY * amount
-        local yaw = math.cos(sw) * 5 * amount
-        return bob, pitch, side, yaw
+    local path = {}            -- where the head has been, newest first
+    local heading = root:getAngles().y
+    local headX, maxDist = 0, 0
+    local lastTick = timer.curtime()
+
+    local function angDiff(a, b)
+        return (a - b + 180) % 360 - 180
     end
 
-    local function animate(amount, speed)
-        local t = timer.systime() * speed
-        local bobs = {}
-        for name, part in pairs(Body) do
-            local bob, pitch, side, yaw = bodyWave(part.k, t, amount)
-            bobs[part.k] = {bob, side}
-            part.holo:setLocalPos(part.base + Vector(0, side, bob) * SCALE)
-            part.holo:setLocalAngles(Angle(pitch, yaw, 0))
+    -- point on the trail d units behind the head
+    local function pathAt(d)
+        local acc = 0
+        for i = 1, #path - 1 do
+            local a, b = path[i], path[i + 1]
+            local len = a:getDistance(b)
+            if acc + len >= d then
+                return a + (b - a) * ((d - acc) / math.max(len, 0.001))
+            end
+            acc = acc + len
         end
-        for name, leg in pairs(Legs) do
-            -- each leg rides on its segment and steps a beat after the hump passes it
-            local k = math.min(leg.num, 6)
-            local b = bobs[k] or {0, 0}
+        local last = path[#path]
+        local prev = path[#path - 1] or (last + Angle(0, heading, 0):getForward())
+        return last + (last - prev):getNormalized() * (d - acc)
+    end
+
+    local function trimPath()
+        local acc = 0
+        for i = 1, #path - 1 do
+            acc = acc + path[i]:getDistance(path[i + 1])
+            if acc > maxDist + 20 then
+                for j = #path, i + 2, -1 do path[j] = nil end
+                return
+            end
+        end
+    end
+
+    local function animate(amount, t)
+        for _, part in pairs(Body) do
+            local d = headX - part.base.x
+            local p = pathAt(d)
+            local dir = pathAt(math.max(d - 4, 0)) - pathAt(d + 4)
+            local yaw = dir:getLength() > 0.01 and dir:getAngle().y or heading
+            local phase = t - part.k * WAVE_GAP
+            local bob = math.max(math.sin(phase), 0) * HUMP * amount * SCALE
+            local pitch = math.cos(phase) * 6 * amount
+            local left = -Angle(0, yaw, 0):getRight()
+            part.holo:setPos(p + left * part.base.y + Vector(0, 0, part.base.z + bob))
+            part.holo:setAngles(Angle(pitch, yaw, 0))
+        end
+        for _, leg in pairs(Legs) do
+            local k = leg.seg and leg.seg.k or 0
             local s = leg.side == "L" and 1 or -1
-            local phase = t - k * WAVE_GAP + (leg.side == "R" and math.pi or 0)
+            local phase = t - k * WAVE_GAP - leg.num * 0.4 + (leg.side == "R" and math.pi or 0)
             local swing = math.sin(phase) * 24 * amount
             local lift = math.max(math.cos(phase), 0) * 22 * amount
-            leg.holo:setLocalPos(leg.base + Vector(0, b[2], b[1]) * SCALE)
             leg.holo:setLocalAngles(Angle(0, swing * s, -lift * s))
         end
     end
 
-    local function walkingAnimation()
-        animate(1, CRAWL_RATE)
-    end
+    local function tick()
+        local now = timer.curtime()
+        local dt = math.min(now - lastTick, 0.1)
+        lastTick = now
+        local t = timer.systime()
 
-    local function idleAnimation()
-        animate(0.15, 2)
-    end
+        local head = root:localToWorld(Vector(headX, 0, 0))
+        local o = owner():getPos()
+        local flat = Vector(o.x - head.x, o.y - head.y, 0)
+        local walking = flat:getLength() > FOLLOW_DIST
 
-    local function updateState()
-        local ownerPos = owner():getPos()
-        local bodyPos = root:getPos()
-        local flat = Vector(ownerPos.x - bodyPos.x, ownerPos.y - bodyPos.y, 0)
-        if flat:getLength() > FOLLOW_DIST then
-            State = "Walking"
-            moveDirection = flat:getNormalized()
-            root:setAngles(Angle(0, moveDirection:getAngle().y, 0))
-            root:setPos(bodyPos + moveDirection * WALK_SPEED * 0.1)
+        if walking then
+            local want = flat:getAngle().y
+            heading = heading + math.clamp(angDiff(want, heading), -TURN_RATE * dt, TURN_RATE * dt)
+            local moveYaw = heading + math.sin(t * WEAVE_RATE) * WEAVE
+            root:setAngles(Angle(0, moveYaw, 0))
+            root:setPos(root:getPos() + Angle(0, moveYaw, 0):getForward() * WALK_SPEED * dt)
+            head = root:localToWorld(Vector(headX, 0, 0))
+            if head:getDistance(path[1]) > TRAIL_STEP then
+                table.insert(path, 1, head)
+                trimPath()
+            end
+        end
+
+        State = walking and "Walking" or "Idle"
+        if walking then
+            animate(1, t * CRAWL_RATE)
         else
-            State = "Idle"
-            moveDirection = Vector(0, 0, 0)
+            animate(0.15, t * 2)
         end
     end
 
     local function startMovement()
-        timer.create("FleaAnim", 0.03, 0, function()
-            if State == "Walking" then walkingAnimation() else idleAnimation() end
-        end)
-        timer.create("FleaState", 0.1, 0, updateState)
+        local h = Body["SnareFlea_Head"]
+        headX = h and h.base.x or 0
+        for _, part in pairs(Body) do
+            maxDist = math.max(maxDist, headX - part.base.x)
+        end
+        maxDist = maxDist + 8
+        -- start with a straight trail behind the head
+        local head = root:localToWorld(Vector(headX, 0, 0))
+        path = {head, head - Angle(0, heading, 0):getForward() * (maxDist + 10)}
+
+        timer.create("FleaTick", 0.03, 0, tick)
         timer.create("FleaGround", 0.1, 0, function()
             local p = root:getPos()
             local tr = trace.line(p + Vector(0, 0, 40), p - Vector(0, 0, 9999), {chip(), owner()})
@@ -194,7 +239,7 @@ if CLIENT then
                 return
             end
             local holo = hologram.create(root:getPos(), root:getAngles(), "models/hunter/blocks/cube025x025x025.mdl", Vector(SCALE))
-            holo:setParent(root)
+            if not bodyIndex(name) then holo:setParent(root) end
             Holos[name] = holo
             local m, pivot, side, num
             local done = false
@@ -210,12 +255,28 @@ if CLIENT then
                         holo:setMesh(m)
                         holo:setMeshMaterial(Tex)
                         holo:setRenderBounds(Vector(-70), Vector(70))
-                        holo:setLocalPos((pivot or Vector(0, 0, 0)) * SCALE)
-                        holo:setLocalAngles(Angle(0, 0, 0))
                         local base = (pivot or Vector(0, 0, 0)) * SCALE
-                        if side then Legs[name] = {holo = holo, side = side, num = num, base = base} end
                         local k = bodyIndex(name)
-                        if k then Body[name] = {holo = holo, k = k, base = base} end
+                        if k then
+                            Body[name] = {holo = holo, k = k, base = base}
+                            holo:setPos(root:localToWorld(base))
+                            holo:setAngles(root:getAngles())
+                        end
+                        if side then
+                            -- ride on the body part closest to the hip
+                            local seg, best = nil, math.huge
+                            for _, part in pairs(Body) do
+                                local dist = math.abs(part.base.x - base.x)
+                                if part.k > 0 and dist < best then best = dist; seg = part end
+                            end
+                            Legs[name] = {holo = holo, side = side, num = num, base = base, seg = seg}
+                            if seg then
+                                holo:setParent(seg.holo)
+                                holo:setLocalPos(base - seg.base)
+                            else
+                                holo:setLocalPos(base)
+                            end
+                        end
                         loaded = loaded + 1
                         if loaded == #Parts then
                             print("Snare flea loaded!")
